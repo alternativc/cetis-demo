@@ -1,0 +1,61 @@
+stages:
+  - test
+  - build
+
+default:
+  image: docker:24.0.7
+
+variables:
+  IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+
+before_script:
+  # Explicitly login to the GitLab Container Registry in each stage
+  - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  # Pull the latest image to speed up cache
+  - docker pull --quiet $CI_REGISTRY_IMAGE:latest || true
+
+test:
+  stage: test
+  services:
+    - docker:24.0.7-dind
+  script:
+    # Install curl on Alpine-based Docker image
+    - apk add --no-cache curl 
+    # Build the Docker image
+    - docker build --tag webapp_test --cache-from $CI_REGISTRY_IMAGE:latest .
+    # Run the Docker container
+    - docker run --name webapp_test_container -d -p 127.0.0.1:5000:80 webapp_test
+    # Wait for the server to start
+    - |
+      attempt=0
+      while ! docker logs webapp_test_container 2>&1 | grep "Now listening on"; do
+        attempt=$((attempt + 1))
+        echo "Attempt $attempt: Server not ready, trying again in 10 seconds..."
+        sleep 10
+        if [ $attempt -ge 10 ]; then
+          echo "Server did not start after 10 attempts."
+          docker logs webapp_test_container
+          exit 1
+        fi
+      done
+    # Stop and remove the container
+    - docker stop webapp_test_container
+    - docker rm webapp_test_container
+  only:
+    - branches
+
+build:
+  stage: build
+  services:
+    - docker:24.0.7-dind
+  script:
+    # Build the Docker image
+    - docker build --tag $IMAGE_TAG --cache-from $CI_REGISTRY_IMAGE:latest .
+    # Push the Docker image to the GitLab Container Registry
+    - docker push $IMAGE_TAG
+    # Tag the Docker image as latest
+    - docker tag $IMAGE_TAG $CI_REGISTRY_IMAGE:latest
+    # Push the Docker image as latest
+    - docker push $CI_REGISTRY_IMAGE:latest
+  only:
+    - main
